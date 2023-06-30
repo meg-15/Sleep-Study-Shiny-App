@@ -7,7 +7,17 @@ library(RSQLite)
 #Options------------------------------------------------------------------------
 options(shiny.maxRequestSize=4000*1024^2)
 
-con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer 2023 Project/test_2.db") 
+con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/test_2.db") 
+
+sql_meta <- glue_sql("
+    SELECT *
+    FROM channelmeta
+ ", .con = con)
+
+query_meta <- DBI::dbSendQuery(con, sql_meta)
+
+meta <- DBI::dbFetch(query_meta)
+DBI::dbClearResult(query_meta)
 
 #UI-----------------------------------------------------------------------------
 ui <- fluidPage(
@@ -76,7 +86,7 @@ server <- function(input,output, session) {
   })
   
   
-  #Plot 1-------------------------------------------------------------------------
+#Plot 1-------------------------------------------------------------------------
   output$plot1 <- renderPlot({
     chan <- paste0('1', input$Select2)
     
@@ -94,13 +104,17 @@ server <- function(input,output, session) {
     min <- which(data$Time == as.numeric(input$Time1))
     max <- which(data$Time == as.numeric(input$Time2))
     
+    meta <- meta[which(meta$ChannelID == chan),]
+    name <- meta$ChannelName
+    units <- meta$Units
+    
     plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Stim Monitor (V)", xlab = "Time (sec)", 
+         main = paste0(name, ' (', units, ')'), xlab = "Time (sec)", 
          ylab = "Stim Monitor (V)")
     
   })
   
-  #Plot 3-------------------------------------------------------------------------
+#Plot 2-------------------------------------------------------------------------
   output$plot2 <- renderPlot({
     chan <- paste0('2', input$Select2)
     
@@ -124,7 +138,7 @@ server <- function(input,output, session) {
     
   })
   
-  #Plot 2-------------------------------------------------------------------------
+#Plot 3-------------------------------------------------------------------------
   output$plot3 <- renderPlot({
     chan <- paste0('3', input$Select2)
     
