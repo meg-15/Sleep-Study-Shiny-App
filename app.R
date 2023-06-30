@@ -7,28 +7,17 @@ library(RSQLite)
 #Options------------------------------------------------------------------------
 options(shiny.maxRequestSize=4000*1024^2)
 
-con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/test_2.db") 
-
-sql_meta <- glue_sql("
-    SELECT *
-    FROM channelmeta
- ", .con = con)
-
-query_meta <- DBI::dbSendQuery(con, sql_meta)
-
-meta <- DBI::dbFetch(query_meta)
-DBI::dbClearResult(query_meta)
+con <- DBI::dbConnect(RSQLite::SQLite(), "test_2.db") 
 
 #UI-----------------------------------------------------------------------------
 ui <- fluidPage(
   titlePanel("VUMC Sleep Study Database"),
   sidebarLayout(
     sidebarPanel(
-      verbatimTextOutput("test"),
       #Select Options (appear once file is uploaded)
       uiOutput("selectvar"),
       br(),
-      strong(h4("Select Time Range (sec):")),
+      h4(strong("Select Time Range (sec):")),
       uiOutput("select_time1"),
       uiOutput("select_time2")
     ),
@@ -104,12 +93,8 @@ server <- function(input,output, session) {
     min <- which(data$Time == as.numeric(input$Time1))
     max <- which(data$Time == as.numeric(input$Time2))
     
-    meta <- meta[which(meta$ChannelID == chan),]
-    name <- meta$ChannelName
-    units <- meta$Units
-    
     plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = paste0(name, ' (', units, ')'), xlab = "Time (sec)", 
+         main = "Stim Monitor (V)", xlab = "Time (sec)", 
          ylab = "Stim Monitor (V)")
     
   })
@@ -161,6 +146,126 @@ server <- function(input,output, session) {
          ylab = "RIP Abd (mV)")
     
   })
+
+#Plot 4-------------------------------------------------------------------------
+  output$plot4 <- renderPlot({
+    chan <- paste0('4', input$Select2)
+    
+    sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+    
+    query_data <- DBI::dbSendQuery(con, sql_data)
+    
+    data <- DBI::dbFetch(query_data)
+    DBI::dbClearResult(query_data)
+    
+    min <- which(data$Time == as.numeric(input$Time1))
+    max <- which(data$Time == as.numeric(input$Time2))
+    
+    plot(data$Time[min:max], data$Value[min:max], type = "l",
+         main = "Pv (mmHg)", xlab = "Time (sec)", 
+         ylab = "Pv (mmHg)")
+    
+  })
+
+#Plot 5-------------------------------------------------------------------------
+  output$plot5 <- renderPlot({
+    chan <- paste0('5', input$Select2)
+    
+    sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+    
+    query_data <- DBI::dbSendQuery(con, sql_data)
+    
+    data <- DBI::dbFetch(query_data)
+    DBI::dbClearResult(query_data)
+    
+    min <- which(data$Time == as.numeric(input$Time1))
+    max <- which(data$Time == as.numeric(input$Time2))
+    
+    plot(data$Time[min:max], data$Value[min:max], type = "l",
+         main = "Pepi (mmHg)", xlab = "Time (sec)", 
+         ylab = "Pepi (mmHg)")
+    
+  })
+  
+#Plot 6-------------------------------------------------------------------------
+  output$plot6 <- renderPlot({
+    chan <- paste0('6', input$Select2)
+    
+    sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+    
+    query_data <- DBI::dbSendQuery(con, sql_data)
+    
+    data <- DBI::dbFetch(query_data)
+    DBI::dbClearResult(query_data)
+    
+    min <- which(data$Time == as.numeric(input$Time1))
+    max <- which(data$Time == as.numeric(input$Time2))
+    
+    plot(data$Time[min:max], data$Value[min:max], type = "l",
+         main = "Flow (L/min)", xlab = "Time (sec)", 
+         ylab = "Flow (L/min)")
+    
+  })
+
+#Plot 7-------------------------------------------------------------------------
+  output$plot7 <- renderPlot({
+    chan <- paste0('7', input$Select2)
+    
+    sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+    
+    query_data <- DBI::dbSendQuery(con, sql_data)
+    
+    data <- DBI::dbFetch(query_data)
+    DBI::dbClearResult(query_data)
+    
+    min <- which(data$Time == as.numeric(input$Time1))
+    max <- which(data$Time == as.numeric(input$Time2))
+    
+    plot(data$Time[min:max], data$Value[min:max], type = "l",
+         main = "Volume (L)", xlab = "Time (sec)", 
+         ylab = "Volume (L)")
+    
+  })
+  
+#Plot 8-------------------------------------------------------------------------
+  output$plot8 <- renderPlot({
+    chan <- paste0('8', input$Select2)
+    
+    sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+    
+    query_data <- DBI::dbSendQuery(con, sql_data)
+    
+    data <- DBI::dbFetch(query_data)
+    DBI::dbClearResult(query_data)
+    
+    min <- which(data$Time == as.numeric(input$Time1))
+    max <- which(data$Time == as.numeric(input$Time2))
+    
+    plot(data$Time[min:max], data$Value[min:max], type = "l",
+         main = "CPAP Pressure (cm H2O)", xlab = "Time (sec)", 
+         ylab = "CPAP Pressure (cm H2O)")
+    
+  })
   
   #Displaying head 'pt_char'
   output$table1 <- renderTable({ 
@@ -193,7 +298,8 @@ server <- function(input,output, session) {
                  h4(strong('Channel Meta Data')),tableOutput("table2"), br(), 
                  h4(strong('Channel Data')), tableOutput("table3"), br(),  
                  h4(strong('Annotations')),tableOutput("table4")),
-        tabPanel("Plots", plotOutput('plot1'), plotOutput('plot2'), plotOutput('plot3'))
+        tabPanel("Plots", plotOutput('plot1'), plotOutput('plot2'), plotOutput('plot3'), plotOutput('plot4'),
+                 plotOutput('plot5'), plotOutput('plot6'), plotOutput('plot7'), plotOutput('plot8'))
       )
   })
 }
