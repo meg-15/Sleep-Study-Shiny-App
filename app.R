@@ -3,26 +3,78 @@ library(shiny)
 library(glue)
 library(DBI)
 library(RSQLite)
+library(ggplot2)
+library(shinyjs)
 
 #Options------------------------------------------------------------------------
 options(shiny.maxRequestSize=4000*1024^2)
+  #increases allowed upload size...I do not think I need this since you don't upload anything.
 
-con <- DBI::dbConnect(RSQLite::SQLite(), "test_2.db") 
+#Connection---------------------------------------------------------------------
+con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/test_2.db") 
+  #need to add 'disconnect when close app' option
+
+#Functions Bank-----------------------------------------------------------------
+
+#Extracts data from a specific channel in database
+get_channel_data <- function(num, chan){   
+  chan <- paste0(num, chan)
+  
+  sql_data <- glue_sql("
+    SELECT *
+    FROM channeldata
+    WHERE ChannelID = {chan}
+  ", .con = con)
+  
+  query_data <- DBI::dbSendQuery(con, sql_data)
+  
+  data <- DBI::dbFetch(query_data)
+  DBI::dbClearResult(query_data)
+  
+  return(list (chan, data))
+}
+
+#Makes basic plot of channel data by selected time range
+basic_plot <- function(chan_dat, time_range, meta_data, col){
+  chan <- chan_dat[[1]]
+  data <- chan_dat[[2]]
+  
+  min <- which(data$Time == time_range[1])
+  max <- which(data$Time == time_range[2])
+  
+  meta1 <- meta_data[which(meta_data$ChannelID == chan),]
+  name <- meta1$ChannelName
+  units <- meta1$Units
+  
+  main <- paste0(name, " (", units, ")")
+  ggplot(data[min:max,], aes(x=Time, y=Value)) + geom_line(color = col) + 
+    ggtitle(main) + xlab("Time (sec)") + ylab(main) +
+    theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+          axis.title.x = element_text(size = 10),
+          axis.title.y = element_text(size = 10))
+}
 
 #UI-----------------------------------------------------------------------------
 ui <- fluidPage(
   titlePanel("VUMC Sleep Study Database"),
   sidebarLayout(
     sidebarPanel(
-      #Select Options (appear once file is uploaded)
+      useShinyjs(),
+      #Select Options 
       uiOutput("selectvar"),
       br(),
+      #Time Options
       h4(strong("Select Time Range (sec):")),
+      #Below appears after app loads
+      conditionalPanel(condition="$('html').hasClass('shiny-busy')",
+                       tags$div("Loading...",id="loadmessage")),
+      textOutput("time_range"),
       uiOutput("select_time1"),
-      uiOutput("select_time2")
+      uiOutput("select_time2"),
+      actionButton("run", "Plot Raw Signals")
     ),
     mainPanel(
-      #Tabs (appear once file is uploaded)
+      #Tabs 
       uiOutput("tb")
     )
     
@@ -34,272 +86,133 @@ ui <- fluidPage(
 
 server <- function(input,output, session) {
   
-  #Select options in side bar that depend on output
-  #Selecting Person to graph
+#Selecting subject to graph-----------------------------------------------------
   output$selectvar <- renderUI({
-    opts <- dbGetQuery(con, 'SELECT SubjectID FROM pt_char')
-    list(hr(), 
-         selectInput("Select2", "Select Subject:", choices = opts)
+    opts <- dbGetQuery(con, 'SELECT SubjectID FROM pt_char')[[1]]
+    list(selectInput("Select2", "Select Subject:", choices = opts)
     )
-    
   })
   
+#Enter Time Range -------------------------------------------------------------
+  
+#Range of possible times
+  poss_time <- reactive({
+    if(is.null(input$Select2)) {return()}
+    select_sub <- dbQuoteLiteral(con, paste0('_',input$Select2))
+    query_sub = paste0("SELECT TIME FROM channeldata WHERE ChannelID LIKE ", select_sub)
+    time <- dbGetQuery(con, query_sub)
+    c(min(time), max(time))
+  })
+  
+#Enter Start Time
   output$select_time1 <- renderUI({
     if(is.null(input$Select2)) {return()}
-    select_sub <- dbQuoteLiteral(con, paste0('_',input$Select2))
-    query_sub = paste0("SELECT TIME FROM channeldata WHERE ChannelID LIKE ", select_sub)
-    time <- dbGetQuery(con, query_sub)
-    
-    t_min = min(time)
-    t_max = max(time)
-    
-    list(hr(),
-         numericInput("Time1", "Start:", value = 1990, min = t_min, max = t_max)
+    list(numericInput("Time1", "Start:", value = poss_time()[1], 
+                      min = poss_time()[1], max = poss_time()[2])
     )
-    
   })
   
+#Enter End Time
   output$select_time2 <- renderUI({
     if(is.null(input$Select2)) {return()}
-    select_sub <- dbQuoteLiteral(con, paste0('_',input$Select2))
-    query_sub = paste0("SELECT TIME FROM channeldata WHERE ChannelID LIKE ", select_sub)
-    time <- dbGetQuery(con, query_sub)
-    
-    t_min = min(time)
-    t_max = max(time)
-    
-    list(hr(),
-         numericInput("Time2", "End:", value = 2000, min = t_min, max = t_max)
+    list(numericInput("Time2", "Start:", value = poss_time()[2], 
+                      min = poss_time()[1], max = poss_time()[2])
     )
-    
   })
   
+#Setting Time as Reactive Values
+  time <- reactiveValues(time1 = NULL, time2 = NULL) 
+  observeEvent(input$run,{time$time1 <- input$Time1})
+  observeEvent(input$run,{time$time2 <- input$Time2})
+  
+#Printed Instructions for Entering Time Range
+  output$time_range <- renderText({
+    if(is.null(input$Select2)) {return()}
+    paste0("Enter time range and press 'Plot' to view graphs. The time range for the selected subject is ",
+                                          poss_time()[1], " to ", poss_time()[2], " seconds.")})
+
+#Set Time Range When Button is Pressed (also renders error messages for invalid values)
+  range <- eventReactive(input$run, {
+    validate(need(time$time1 >= poss_time()[1], "Start time is out of range.")) 
+      #start time must be greater than or equal to smallest possible time
+    validate(need(time$time2 <= poss_time()[2], "End time is out of range."))
+      #end time must be less than or equal to greatest possible time
+    c(as.numeric(time$time1), as.numeric(time$time2))
+  })
+  
+#Hide Button Until Time is Loaded
+  observe({
+    shinyjs::hide("run")
+    
+    if(!is.null(input$Time1))
+      shinyjs::show("run")
+  })
+
+#Meta Data----------------------------------------------------------------------
+  
+  meta <- reactive({
+    meta <- dbGetQuery(con, 'SELECT * FROM channelmeta')
+    meta$ChannelName <- sub("_", " ", meta$ChannelName)
+    meta
+  })
   
 #Plot 1-------------------------------------------------------------------------
-  output$plot1 <- renderPlot({
-    chan <- paste0('1', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Stim Monitor (V)", xlab = "Time (sec)", 
-         ylab = "Stim Monitor (V)")
-    
-  })
+  
+  chan1 <- reactive(get_channel_data(1, input$Select2))
+  
+  output$plot1 <- renderPlot({basic_plot(chan1(), range(), meta(), "red")})
   
 #Plot 2-------------------------------------------------------------------------
-  output$plot2 <- renderPlot({
-    chan <- paste0('2', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "RIP Thorax (mV)", xlab = "Time (sec)", 
-         ylab = "RIP Thorax (mV)")
-    
-  })
+  chan2 <- reactive(get_channel_data(2, input$Select2))
+  
+  output$plot2 <- renderPlot({basic_plot(chan2(), range(), meta(), "blue")})
   
 #Plot 3-------------------------------------------------------------------------
-  output$plot3 <- renderPlot({
-    chan <- paste0('3', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "RIP Abd (mV)", xlab = "Time (sec)", 
-         ylab = "RIP Abd (mV)")
-    
-  })
-
+  chan3 <- reactive(get_channel_data(3, input$Select2))
+  
+  output$plot3 <- renderPlot({basic_plot(chan3(), range(), meta(), "green")})
+  
 #Plot 4-------------------------------------------------------------------------
-  output$plot4 <- renderPlot({
-    chan <- paste0('4', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Pv (mmHg)", xlab = "Time (sec)", 
-         ylab = "Pv (mmHg)")
-    
-  })
-
+  chan4 <- reactive(get_channel_data(4, input$Select2))
+  
+  output$plot4 <- renderPlot({basic_plot(chan4(), range(), meta(), "violetred")})
+  
 #Plot 5-------------------------------------------------------------------------
-  output$plot5 <- renderPlot({
-    chan <- paste0('5', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Pepi (mmHg)", xlab = "Time (sec)", 
-         ylab = "Pepi (mmHg)")
-    
-  })
+  chan5 <- reactive(get_channel_data(5, input$Select2))
+  
+  output$plot5 <- renderPlot({basic_plot(chan5(), range(), meta(), "purple3")})
   
 #Plot 6-------------------------------------------------------------------------
-  output$plot6 <- renderPlot({
-    chan <- paste0('6', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Flow (L/min)", xlab = "Time (sec)", 
-         ylab = "Flow (L/min)")
-    
-  })
-
+  chan6 <- reactive(get_channel_data(6, input$Select2))
+  
+  output$plot6 <- renderPlot({basic_plot(chan6(), range(), meta(), "seagreen2")})
+  
 #Plot 7-------------------------------------------------------------------------
-  output$plot7 <- renderPlot({
-    chan <- paste0('7', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "Volume (L)", xlab = "Time (sec)", 
-         ylab = "Volume (L)")
-    
-  })
+  chan7 <- reactive(get_channel_data(7, input$Select2))
+  
+  output$plot7 <- renderPlot({basic_plot(chan7(), range(), meta(), "darkgoldenrod2")})
   
 #Plot 8-------------------------------------------------------------------------
-  output$plot8 <- renderPlot({
-    chan <- paste0('8', input$Select2)
-    
-    sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
-    WHERE ChannelID = {chan}
-  ", .con = con)
-    
-    query_data <- DBI::dbSendQuery(con, sql_data)
-    
-    data <- DBI::dbFetch(query_data)
-    DBI::dbClearResult(query_data)
-    
-    min <- which(data$Time == as.numeric(input$Time1))
-    max <- which(data$Time == as.numeric(input$Time2))
-    
-    plot(data$Time[min:max], data$Value[min:max], type = "l",
-         main = "CPAP Pressure (cm H2O)", xlab = "Time (sec)", 
-         ylab = "CPAP Pressure (cm H2O)")
-    
-  })
+  chan8 <- reactive(get_channel_data(8, input$Select2))
   
-  #Displaying head 'pt_char'
-  output$table1 <- renderTable({ 
-    dbGetQuery(con, 'SELECT * FROM pt_char LIMIT 5')
-  })
-  
-  #Displaying head 'channelmeta'
-  output$table2 <- renderTable({ 
-    dbGetQuery(con, 'SELECT * FROM channelmeta LIMIT 5')
-  })
-  
-  #Displaying head 'channeldata'
-  output$table3 <- renderTable({ 
-    dbGetQuery(con, 'SELECT * FROM channeldata LIMIT 5')
-  })
-  
-  #Displaying head 'annots'
-  output$table4 <- renderTable({ 
-    dbGetQuery(con, 'SELECT * FROM annots LIMIT 5')
-  })
+  output$plot8 <- renderPlot({basic_plot(chan8(), range(), meta(), "darkorchid2")})
   
   
-  
-  #Main Panel Tabs
+#Main Panel Tabs----------------------------------------------------------------
+#Plots not shown until button is pressed.
   output$tb <- renderUI({
     if(is.null(con)) {return(c('None'))}
     else
       tabsetPanel(
-        tabPanel("Example Output of Each Table", h4(strong('Patient Characteristics')), tableOutput("table1"), br(),  
-                 h4(strong('Channel Meta Data')),tableOutput("table2"), br(), 
-                 h4(strong('Channel Data')), tableOutput("table3"), br(),  
-                 h4(strong('Annotations')),tableOutput("table4")),
-        tabPanel("Plots", plotOutput('plot1'), plotOutput('plot2'), plotOutput('plot3'), plotOutput('plot4'),
-                 plotOutput('plot5'), plotOutput('plot6'), plotOutput('plot7'), plotOutput('plot8'))
+        tabPanel("Raw Signal", 
+                 plotOutput('plot1', height = 150), 
+                 plotOutput('plot2', height = 150),
+                 plotOutput('plot3', height = 150), 
+                 plotOutput('plot4', height = 150),
+                 plotOutput('plot5', height = 150), 
+                 plotOutput('plot6', height = 150),
+                 plotOutput('plot7', height = 150), 
+                 plotOutput('plot8', height = 150))
       )
   })
 }
