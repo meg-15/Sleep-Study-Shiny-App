@@ -6,20 +6,43 @@ library(RSQLite)
 library(shinyjs)
 library(plotly)
 library(reticulate)
+library(dplyr)
+library(DT)
+library(stringr)
 
 use_virtualenv('my-python', required = TRUE)
 source_python("C:/Users/megan/Desktop/Summer-2023-Project/Sleep-Study-Shiny-App/reference.py")
 
 np <- import("numpy", convert = TRUE)
 
-
 #Options------------------------------------------------------------------------
-options(shiny.maxRequestSize=4000*1024^2)
-#increases allowed upload size...I do not think I need this since you don't upload anything.
+#options(shiny.maxRequestSize=4000*1024^2)
 
 #Connection---------------------------------------------------------------------
-con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/test_2.db") 
+con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/Sleep-Study-Shiny-App/test_3.db") #need to fix test_3
 #need to add 'disconnect when close app' option
+
+#Setting Up Annotations---------------------------------------------------------
+#Create Responses Table
+annots <- data.frame(row_id = character(),
+                     ChannelID = character(),
+                     AnnotationID = numeric(),
+                     Time = numeric(), 
+                     Annotation = character(),
+                     stringsAsFactors = FALSE)
+
+#Add Responses to 'annots'
+dbWriteTable(con, "annots", annots, overwrite = FALSE, append = TRUE)
+
+#Label Mandatory Fields---------------------------------------------------------
+labelMandatory <- function(label) {
+  tagList(
+    label,
+    span("*", class = "mandatory_star")
+  )
+}
+
+appCSS <- ".mandatory_star { color: red; }"
 
 #Functions Bank-----------------------------------------------------------------
 
@@ -600,6 +623,7 @@ server <- function(input,output, session) {
     p <- subplot(list(plot1, plot2, plot3, plot4, plot5, plot6, plot7, plot8), 
                  nrows = 8, shareX = TRUE, margin = 0.02) %>% layout(xaxis = list(title = 'Time (sec)'))
     p <- hide_legend(p)
+    p
   })
   
 #Annotations--------------------------------------------------------------------
@@ -662,22 +686,161 @@ server <- function(input,output, session) {
     df_breaths
   })
   
-  output$table_curve1 <- renderTable({
-    dat <- get_plot_data(df = df_breaths())
-    as.data.frame(dat[,1])
-    })
-  output$table_curve2 <- renderTable({
-    dat <- get_plot_data(df = df_breaths())
-    as.data.frame(dat[,2])
-  })
-  output$table_curve3 <- renderTable({
-    dat <- get_plot_data(df = df_breaths())
-    as.data.frame(dat[,3])
-  })
-  
   output$flow_curve <- renderPlotly({
     plot_pressure_flow_curve(df = df_breaths(), outside = input$outside, curve = input$curve)
     })
+
+#Annotations--------------------------------------------------------------------  
+#load annots and make reactive to inputs  
+  annots <- reactive({
+    
+    #make reactive to
+    input$submit
+    input$submit_edit
+    input$delete_button
+    
+    dbReadTable(con, "annots")
+    
+  })  
+  
+#List of mandatory fields for submission
+  fieldsMandatory <- c("ChannelID", "AnnotationID", "Time", "Annotation")
+  
+#define which input fields are mandatory 
+  observe({
+    
+    mandatoryFilled <-
+      vapply(fieldsMandatory,
+             function(x) {
+               !is.null(input[[x]]) && input[[x]] != ""
+             },
+             logical(1))
+    mandatoryFilled <- all(mandatoryFilled)
+    
+    shinyjs::toggleState(id = "submit", condition = mandatoryFilled)
+  })
+
+  fieldsAll <- c("ChannelID", "AnnotationID", "Time", "Annotation")
+  
+#save form data into data_frame format
+  formData <- reactive({
+    
+    formData <- data.frame(row_id = paste0(input$ChannelID, input$AnnotationID),
+                           ChannelID = input$ChannelID,
+                           AnnotationID = input$AnnotationID,
+                           Time = input$Time, 
+                           Annotation = input$Annotation,
+                           stringsAsFactors = FALSE)
+    return(formData)
+    
+  })
+  
+#Add Data Functions-------------------------------------------------------------
+  appendData <- function(data){
+    quary <- sqlAppendTable(con, "annots", data, row.names = FALSE)
+    dbExecute(con, quary)
+  }
+  
+  observeEvent(input$submit, priority = 20,{
+    appendData(formData())
+  })
+  
+#Delete Data Functions ---------------------------------------------------------
+  deleteData <- reactive({
+    SQL_df <- dbReadTable(con, "annots")
+    row_selection <- SQL_df[input$responses_table_rows_selected, "row_id"]
+    
+    quary <- lapply(row_selection, function(nr){
+      
+      dbExecute(con, sprintf('DELETE FROM "annots" WHERE "row_id" == ("%s")', nr))
+    })
+  })
+  
+  observeEvent(input$delete_button, priority = 20,{
+    
+    if(length(input$responses_table_rows_selected)>=1 ){
+      deleteData()
+    }
+    
+    showModal(
+      
+      if(length(input$responses_table_rows_selected) < 1 ){
+        modalDialog(
+          title = "Warning",
+          paste("Please select row(s)." ),easyClose = TRUE
+        )
+      })
+  })
+  
+#Edit Data Functions------------------------------------------------------------
+  observeEvent(input$edit_button, priority = 20,{
+    
+    hide("submit")
+    
+    output$submit_edit <- renderUI({
+      actionButton("submit_edit", label = "Submit Edit", , class = "btn-primary")
+    })
+    
+    SQL_df <- dbReadTable(con, "annots")
+    
+    showModal(
+      if(length(input$responses_table_rows_selected) > 1 ){
+        modalDialog(
+          title = "Warning",
+          paste("Please select only one row." ),easyClose = TRUE)
+      } else if(length(input$responses_table_rows_selected) < 1){
+        modalDialog(
+          title = "Warning",
+          paste("Please select a row." ),easyClose = TRUE)
+      })  
+    
+    if(length(input$responses_table_rows_selected) == 1 ){
+      
+      updateTextInput(session, "ChannelID", value = SQL_df[input$responses_table_rows_selected, "ChannelID"])
+      updateNumericInput(session, "AnnotationID", value = SQL_df[input$responses_table_rows_selected, "AnnotationID"])
+      updateNumericInput(session, "Time", value = SQL_df[input$responses_table_rows_selected, "Time"])
+      updateTextAreaInput(session, "Annotation", value = SQL_df[input$responses_table_rows_selected, "Annotation"])
+      
+    }
+    
+  })
+  
+  observeEvent(input$submit_edit, priority = 20, {
+    
+    SQL_df <- dbReadTable(con, "annots")
+    row_selection <- SQL_df[input$responses_table_row_last_clicked, "row_id"] 
+    
+    dbExecute(con, sprintf('UPDATE "annots" SET "ChannelID" = ?, "AnnotationID" = ?, "Time" = ?,
+                          "Annotation" = ? WHERE "row_id" = ("%s")', row_selection), 
+              param = list(input$ChannelID,
+                           input$AnnotationID,
+                           input$Time,
+                           input$Annotation))
+    
+    updateTextInput(session, "ChannelID", value = " ")
+    updateNumericInput(session, "AnnotationID", value = 0)
+    updateNumericInput(session, "Time", value = 0)
+    updateTextAreaInput(session, "Annotation", value = " ")
+    #removeModal()
+    
+    hide("submit_edit")
+    show("submit")
+    
+  })
+  
+#Annotations Table--------------------------------------------------------------
+  output$responses_table <- DT::renderDataTable({
+    
+    table <- annots() %>% select(-row_id) %>% filter(str_detect(ChannelID, input$Select2))
+    names(table) <- c("ChannelID", "AnnotationID", "Time", "Annotation")
+    table <- datatable(table, 
+                       rownames = FALSE,
+                       options = list(searching = TRUE, lengthChange = TRUE,
+                                      pageLength = 10,
+                                      lengthMenu = list(c(10, 25, -1), c('10', '25', 'ALL'))
+                       ))
+    table
+  })
   
   
   
@@ -699,8 +862,36 @@ server <- function(input,output, session) {
                  plotlyOutput('flow_curve'),
                  tableOutput('table_curve1'), tableOutput('table_curve2'), tableOutput('table_curve3')),
         tabPanel("Annotations", 
-                 br(), tableOutput('annots'))
-      )
+                 br(), 
+                 fluidRow(
+                   column(6,
+                          div(
+                            id = "form",
+                            
+                            textInput("ChannelID", labelMandatory("ChannelID"), placeholder = ""),
+                            numericInput("AnnotationID", labelMandatory("AnnotationID"), value = 0),
+                            numericInput("Time", labelMandatory("Time"), value = 0, width = "400px"),
+                            textAreaInput("Annotation", labelMandatory("Annotation"), placeholder = "", height = 100, width = "400px"),
+                            helpText(labelMandatory(""), paste("Mandatory field.")),
+                            uiOutput("submit_edit"),
+                            actionButton("submit", "Submit", class = "btn-primary"),
+                            br(),
+                            br(),
+                            actionButton("edit_button", "Edit", class = "btn-primary"),
+                            actionButton("delete_button", "Delete", class = "btn-primary"),
+                            
+                            
+                            shinyjs::hidden(
+                              span(id = "submit_msg", "Submitting..."),
+                              div(id = "error",
+                                  div(br(), tags$b("Error: "), span(id = "error_msg"))
+                              )
+                            ))
+                   ),
+                   column(6,
+                          dataTableOutput("responses_table")
+                   ))
+      ))
   })
 }
 
