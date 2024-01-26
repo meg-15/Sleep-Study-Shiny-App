@@ -32,15 +32,15 @@ library(fresh)
 #Python Environment-------------------------------------------------------------
 
 use_virtualenv('my-python', required = TRUE)
-source_python("C:/Users/megan/Desktop/Summer-2023-Project/Sleep-Study-Shiny-App/reference.py")
+source_python("reference.py")
 
 np <- import("numpy", convert = TRUE)
 
 #Options------------------------------------------------------------------------
 #options(shiny.maxRequestSize=4000*1024^2)
 
-#Connection---------------------------------------------------------------------
-con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/Desktop/Summer-2023-Project/Sleep-Study-Shiny-App/data_new3.db") 
+#Connection to SQL database-----------------------------------------------------
+con <- DBI::dbConnect(RSQLite::SQLite(), "data_new3.db") 
 #need to add 'disconnect when close app' option
 
 #Setting Up Annotations---------------------------------------------------------
@@ -52,17 +52,17 @@ annots_new <- data.frame(AnnotationID = numeric(),
                          Annotation = character(),
                          stringsAsFactors = FALSE)
 
-#Add Responses to 'annots'
+#Add Responses to 'annots' SQL table
 dbWriteTable(con, "annots", annots_new, overwrite = FALSE, append = TRUE)
 
-#Label Mandatory Fields---------------------------------------------------------
+#CSS code-----------------------------------------------------------------------
+
+#Add red * to mandatory fields in annotation form
 labelMandatory <- function(label) {
   tagList(
     label,
     span("*", class = "mandatory_star")
-  )
-}
-
+  )}
 appCSS <- ".mandatory_star { color: red; }"
 
 #Functions Bank-----------------------------------------------------------------
@@ -74,55 +74,62 @@ appCSS <- ".mandatory_star { color: red; }"
 #Extracts data from a specific channel in database
 get_channel_data <- function(chan, sub, met, downsamp = FALSE){   
 
-  sql_data <- glue_sql("
-    SELECT *
-    FROM channeldata
+  query <- glue_sql("
+    SELECT * FROM channeldata 
     WHERE ChannelID = {chan} AND SubjectID = {sub}
-  ", .con = con)
+  ", .con = con) 
   
-  data <- dbGetQuery(con, sql_data)
+  data <- dbGetQuery(con, query)
   
-  if (downsamp == TRUE) {
-    meta <- met
+  if (downsamp == TRUE) { 
+    #downsamples rows with high sampling rate to have same rate as other rows
+    #Stim Monitor channel samples 100x more often than other channels
     
-    rate_stim <- meta[meta$ChannelID == chan,'SampleRate'][1]
-    rate <- unique(meta[meta$SampleRate != rate_stim, 'SampleRate']) 
+    meta <- met #meta table from SQL
     
-    data$Value <- low_pass_filter(data$Value, rate = rate_stim, cutoff = 1)
+    rate_stim <- meta[meta$ChannelID == chan,'SampleRate'][1] #pulls sample rate for selected channel
+    rate <- unique(meta[meta$SampleRate != rate_stim, 'SampleRate']) #pulls sample rate for other channels
+    data$Value <- low_pass_filter(data$Value, rate = rate_stim, cutoff = 1) 
+      #low_pass_filter fxn written by Yike (found in Python reference file)
     
     data2 <- down_sample(sig_stim_lfilt = data$Value, sample_rate = rate) 
+    #down_sample fxn written by Yike (found in Python reference file)
     
-    list <- which(!is.na(match(data$Value, data2)))
-    
-    data <- data[list,]
+    list <- which(!is.na(match(data$Value, data2))) 
+    data <- data[list,] #rebuilds data only using values that are kept after down_sample
   }
   
   return(list(channel = chan, data = data)) 
 }
 
-#Makes basic plot of channel data by selected time range
+#Makes basic value vs. time plot of channel data by selected time range
 basic_plot <- function(chan_dat, time_range, meta_data, annots_data, sub, col){
+  #pulls data from get_channel_data results
   chan <- chan_dat[[1]]
   data <- chan_dat[[2]]
   
+  #index that correlate with time range selected in app
   min <- which(data$Time == time_range[1])
   max <- which(data$Time == time_range[2])
   
+  #selects meta information for selected channel 
   meta1 <- meta_data[which(meta_data$ChannelID == chan),]
   name <- meta1$ChannelName
   units <- meta1$Units
+  main <- paste0(name, " (", units, ")") #creates plot title
   
-  main <- paste0(name, " (", units, ")")
-  
+  #creat plot
   fig <- plot_ly(data[min:max,], x = ~Time, y=~Value, type = 'scatter', mode = 'lines',
                  line = list(color = col), name = '') %>% layout(font = list(size = 9))
   
+  #add title
   fig <- fig %>% add_annotations(text = main,  x = 0, y = 1,
                                  yref = "paper", xref = "paper",
                                  xanchor = "left", yanchor = "top",
                                  yshift = 20, xshift = -50, showarrow = FALSE,
                                  font = list(size = 12))
   
+  #REDO THIS TO MATCH NEW DATABASE
   annots <- annots_data
   annot_line <- vector(mode = 'list')
   channels <- c(chan, paste0('0', sub), paste0('-1', sub))
@@ -193,7 +200,7 @@ stim_loop2 <- function(df2, stim_mode, stim = stim_lbl, airway = airway_lbl) {
   num.c <- ncol(df_set)
   
   fl_rows <- which(df_set[airway] == 'FL')
-  fl <- df_set[fl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway)]
+  fl <- df_set[fl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   fl['Flow.max.adj'] <- fl['Flow.max.adj'] * 1000/60
   fl <- cbind(fl, Annotations = df_set[fl_rows, 7:num.c])
   
@@ -201,17 +208,17 @@ stim_loop2 <- function(df2, stim_mode, stim = stim_lbl, airway = airway_lbl) {
   min_nfl_p <- suppressWarnings({ifelse(is.infinite(min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil'])), NA, min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil']))})
   
   ap_rows <- which(df_set[airway] == 'Apnea' & df_set$CPAP.ceil == max_apnea_p)
-  ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway)]
+  ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   ap['Flow.max.adj'] <- ap['Flow.max.adj'] * 1000/60
   ap <- cbind(ap, Annotations = df_set[ap_rows, 7:num.c])
   
   nfl_rows <- which(df_set[airway] == 'NFL' & df_set$CPAP.ceil == min_nfl_p)
-  nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway)]
+  nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   nfl['Flow.max.adj'] <- nfl['Flow.max.adj'] * 1000/60
   nfl <- cbind(nfl, Annotations = df_set[nfl_rows, 7:num.c])
   
   data <- rbind(fl, ap, nfl)
-  colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'Annotations')
+  colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'stim', 'stim.val', 'Annotations')
   
   return(data)
 }
@@ -314,18 +321,18 @@ show_outside <- function(df4, stim_mode, stim = stim_lbl, airway = airway_lbl) {
   min_nfl_p <- suppressWarnings({min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil'])})
   
   ap_rows <- which(df_set[airway] == 'Apnea' & df_set$CPAP.ceil < max_apnea_p | df_set[airway] == 'Dogleg')
-  ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway)]
+  ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   ap['Flow.max.adj'] <- ap['Flow.max.adj'] * 1000/60
   ap <- cbind(ap, Annotaions = df_set[ap_rows, 7:num.c])
   
   nfl_rows <- which(df_set[airway] == 'NFL' & df_set$CPAP.ceil > min_nfl_p)
-  nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway)]
+  nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   nfl['Flow.max.adj'] <- nfl['Flow.max.adj'] * 1000/60
   nfl <- cbind(nfl, Annotaions = df_set[nfl_rows, 7:num.c])
   
   
   data <- rbind(ap, nfl)
-  colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'Annotations')
+  colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'stim', 'stim.val', 'Annotations')
   
   return(data)
   
@@ -601,14 +608,14 @@ ui <- dashboardPage(
         title = "Breaths",
         conditionalPanel(condition="$('html').hasClass('shiny-busy')",
                          tags$div("Loading...",id="loadmessage")),
-        tableOutput("cycles"),
+        dataTableOutput("cycles"),
         width = 6
       )
     )
   )
 )
 
-# Define server
+#Server-------------------------------------------------------------------------
 server <- function(input, output, session) {
   
 #Selecting subject to graph-----------------------------------------------------
@@ -842,11 +849,10 @@ server <- function(input, output, session) {
       stim_lbl <- 'Stim.mode.final'
     }
     num.c <- ncol(cycles)
-    df_breaths <- cbind(cycles[,1:2], df_breaths[,c(airway_lbl, stim_lbl, 'Flow.max.adj', 'CPAP.ceil')], Annotations = cycles[,4:num.c])
+    df_breaths <- cbind(cycles[,1:2], df_breaths[,c(airway_lbl, stim_lbl, 'Flow.max.adj', 'CPAP.ceil', 'Stim.at.max.flow')], Annotations = cycles[,4:num.c])
     p = pressure_flow_curve_data(df = df_breaths)
     return(p)
   })
-  
   
   output$flow_curve <- renderPlotly({
     plot_pressure_flow_curve(df_breaths(), outside = input$outside, curve = input$curve)
@@ -855,13 +861,27 @@ server <- function(input, output, session) {
   #Cycles Table-------------------------------------------------------------------
   
   #reviewed <- reactiveVal(FALSE)
-  
-  output$cycles <- renderTable({
+
+  output$cycles <- DT::renderDataTable({   #changed to datatable, should make downloading data easier
     df <- df_breaths()
-    df2 <- rbind(df[[1]][[2]], df[[2]][[2]])
-    colnames(df2) <- c('Ins. Start', 'Ins. End', 'CPAP Pressure', 'PIF', 'Airway Status', 'Annot.', 'Plot Status')
+    df2 <- rbind(do.call("rbind", df[[1]][2,]), do.call("rbind", df[[2]][2,]))
+    colnames(df2) <- c('Ins. Start', 'Ins. End', 'CPAP Pressure', 'PIF', 'Airway Status', 'Stim Status', 'Stim Value', 'Annot.', 'Plot Status')
+    df2[,c('Ins. Start', 'Ins. End', 'PIF')] <- round(df2[,c('Ins. Start', 'Ins. End', 'PIF')], 2)
+    df2[,c('Stim Value')] <- round(df2[,c('Stim Value')], 8)
     df2[order(df2[,'Ins. Start']),]
-  })
+    },
+    rownames = FALSE, 
+    extensions = 'Buttons',
+    options = list(dom = 'Blfrtip',
+                   buttons = list(list(
+                     extend = "collection"
+                     , buttons = c("csv", "excel", "pdf")
+                     , text = "Download"
+                   ) ),
+                   pageLength = 50,
+                   lengthMenu = list(c(10, 50, -1), c("10", "50", "All")))
+
+  )
   
 #Annotations--------------------------------------------------------------------  
   #load annots and make reactive to inputs  
@@ -955,7 +975,7 @@ server <- function(input, output, session) {
     show("submit_edit")
     
     output$submit_edit <- renderUI({
-      actionButton("submit_edit", label = "Submit Edit", , class = "btn-primary")
+      actionButton("submit_edit", label = "Submit Edit", class = "btn-primary")
     })
     
     showModal(
