@@ -34,16 +34,23 @@ library(fresh)
 use_virtualenv('my-python', required = TRUE)
 source_python("reference.py")
 
+#Python Pacakges
 np <- import("numpy", convert = TRUE)
 
 #Options------------------------------------------------------------------------
 #options(shiny.maxRequestSize=4000*1024^2)
 
 #Connection to SQL database-----------------------------------------------------
-con <- DBI::dbConnect(RSQLite::SQLite(), "data_new3.db") 
+con <- DBI::dbConnect(RSQLite::SQLite(), "C:/Users/megan/OneDrive - Vanderbilt/Desktop/Summer-2023-Project/Sleep-Study-Shiny-App/data_new4.db") 
 #need to add 'disconnect when close app' option
 
 #Setting Up Annotations---------------------------------------------------------
+
+## All annotations loaded from LabChart are already stores in the annots table 
+##  the SQL database. New annotations within the created within the app are 
+##  first added to the annots_new dataframe and then loaded into the annotations
+##  SQL table.
+
 #Create Responses Table
 annots_new <- data.frame(AnnotationID = numeric(),
                          SubjectID = numeric(),
@@ -56,6 +63,7 @@ annots_new <- data.frame(AnnotationID = numeric(),
 dbWriteTable(con, "annots", annots_new, overwrite = FALSE, append = TRUE)
 
 #CSS code-----------------------------------------------------------------------
+  # code for custom formatting options
 
 #Add red * to mandatory fields in annotation form
 labelMandatory <- function(label) {
@@ -66,14 +74,19 @@ labelMandatory <- function(label) {
 appCSS <- ".mandatory_star { color: red; }"
 
 #Functions Bank-----------------------------------------------------------------
+#These functions will be called within the app as needed.
 
   #Generally, the following abbreviations apply to the rest of the app:
     #sub = SubjectID
     #chan = ChannelID
+    #annots = Annotations
+    #stim_mode = Stimulation Mode (EX: ACS, HGNS, Both, Baseline)
+    #PFC = Pressure Flow Curve
   
-#Extracts data from a specific channel in database
+#Extracts data from a specific channel in database, downsample if downsamp = TRUE
 get_channel_data <- function(chan, sub, met, downsamp = FALSE){   
 
+  #selects all columns for observations with channel 'chan' and subject 'sub'
   query <- glue_sql("
     SELECT * FROM channeldata 
     WHERE ChannelID = {chan} AND SubjectID = {sub}
@@ -81,24 +94,30 @@ get_channel_data <- function(chan, sub, met, downsamp = FALSE){
   
   data <- dbGetQuery(con, query)
   
+  #Below downsamples rows with high sampling rate to have same rate as other rows
+  #EX: Stim Monitor channel samples 100x more often than other channels
   if (downsamp == TRUE) { 
-    #downsamples rows with high sampling rate to have same rate as other rows
-    #Stim Monitor channel samples 100x more often than other channels
     
     meta <- met #meta table from SQL
     
-    rate_stim <- meta[meta$ChannelID == chan,'SampleRate'][1] #pulls sample rate for selected channel
-    rate <- unique(meta[meta$SampleRate != rate_stim, 'SampleRate']) #pulls sample rate for other channels
+    #pulls sample rate for selected channel
+    rate_stim <- meta[meta$ChannelID == chan,'SampleRate'][1] 
+    
+    #pulls sample rate for other channels
+    rate <- unique(meta[meta$SampleRate != rate_stim, 'SampleRate']) 
+    
+    #low_pass_filter fxn written by Yike (found in Python reference file)
     data$Value <- low_pass_filter(data$Value, rate = rate_stim, cutoff = 1) 
-      #low_pass_filter fxn written by Yike (found in Python reference file)
     
-    data2 <- down_sample(sig_stim_lfilt = data$Value, sample_rate = rate) 
     #down_sample fxn written by Yike (found in Python reference file)
+    data2 <- down_sample(sig_stim_lfilt = data$Value, sample_rate = rate) 
     
+    #rebuilds data only using values that are kept after down_sample
     list <- which(!is.na(match(data$Value, data2))) 
-    data <- data[list,] #rebuilds data only using values that are kept after down_sample
+    data <- data[list,] 
   }
   
+  #returns list with channel number and data
   return(list(channel = chan, data = data)) 
 }
 
@@ -118,41 +137,53 @@ basic_plot <- function(chan_dat, time_range, meta_data, annots_data, sub, col){
   units <- meta1$Units
   main <- paste0(name, " (", units, ")") #creates plot title
   
-  #creat plot
+  #create plot retricted to selected time range (Value vs. Time)
   fig <- plot_ly(data[min:max,], x = ~Time, y=~Value, type = 'scatter', mode = 'lines',
                  line = list(color = col), name = '') %>% layout(font = list(size = 9))
   
-  #add title
+  #add title (Channel Name)
   fig <- fig %>% add_annotations(text = main,  x = 0, y = 1,
                                  yref = "paper", xref = "paper",
                                  xanchor = "left", yanchor = "top",
                                  yshift = 20, xshift = -50, showarrow = FALSE,
                                  font = list(size = 12))
   
-  #REDO THIS TO MATCH NEW DATABASE
+  #CHECK
+  #add annotations to graph
+    # I added a vertical, gray line to the plot at the annotation time. The line 
+    #  is labelled with the annotation. You can see the label when the mouse
+    #  hovers over the line. 
+    # Some annotations within LabChart were for channel  number 0 or -1. Neither
+    #  of these are channels that hold data.
+    # Within each channel, annotations that are labelled with the chosen channel
+    #   number, 0, or -1 are plotted.
   annots <- annots_data
   annot_line <- vector(mode = 'list')
-  channels <- c(chan, paste0('0', sub), paste0('-1', sub))
-  annots <- cbind(annots, ChannelID = sub('_[^_]*$', '', annots$AnnotationID))
-  
-  for (channel in channels) {         
-    for (n in 1:nrow(annots)) {
-      if (annots$ChannelID[n] == channel &&
-          annots$Time[n] > time_range[1] &&
-          annots$Time[n] < time_range[2]) {
-        fig <- fig %>% add_trace(x = annots$Time[n], type = 'scatter', mode = 'lines',
-                                 line = list(color = "darkgrey"), text = annots$Annotation[n])
+  channels <- c(chan, 0, -1)
+
+  if (nrow(annots) > 0){ #added this because some subjects have no annotations
+    for (channel in channels) {         
+      for (n in 1:nrow(annots)) {
+        #plotting annotations that match channel numbers and are within time range of plot
+        if (annots$ChannelID[n] == channel &&
+            annots$Time[n] > time_range[1] &&
+            annots$Time[n] < time_range[2]) {
+          #adding annotations to plot
+          fig <- fig %>% add_trace(x = annots$Time[n], type = 'scatter', mode = 'lines',
+                                   line = list(color = "darkgrey"), text = annots$Annotation[n])
+        }
       }
     }
   }
-  
+
   return(fig)
   
 }
 
-#Extracts data from a specific channel in database
+#Extracts all annotations from a specific subject in database
 get_annots <- function(sub){   
 
+  #selects all columns for observations with subject 'sub'
   sql_annots <- glue_sql("
     SELECT *
     FROM annots
@@ -160,15 +191,14 @@ get_annots <- function(sub){
   ", .con = con)
   
   annots <- dbGetQuery(con, sql_annots)
-  #annots$Time <- round(annots$Time, 2)
   return(annots)
 }
 
 
-#Get_Baseline______
-#Rewriting functions from Yikes code because I cannot get them to run correctly 
-# when calling from Python
+#The rest of the functions in the function bank are rewritten from Yike's code
+# because I could not get them to run correctly with the reticulate package.
 
+#Get_Baseline (mean expiratory value)
 get_baseline <- function(vector, data){
   start <- as.numeric(data['Exp start'])
   end <- as.numeric(data['Exp end'])
@@ -177,46 +207,66 @@ get_baseline <- function(vector, data){
 
 #Limit Time Range of Data
 limit_range <- function(chans_dat, time_range){
+  #chans_dat is a list of that contains all data from each channel
+  
+  #empty list to store data from channel with limited time range
   chans_new <- vector(mode = 'list', length = length(chans_dat))
+  
   for(n in seq_along(chans_dat)){
+    #select data for channel n
     c <- chans_dat[[n]][[2]]
+    
+    #index for time range
     min <- which(c$Time == time_range[1])
     max <- which(c$Time == time_range[2])
+    
+    #select limited data
     chans_new[[n]] <- c[min:max,]
   }
   return(chans_new)
 }
 
+#Stimulation Loop 1
 stim_loop1 <- function(df1, stim_mode, stim = stim_lbl, airway = airway_lbl){
+  #data subset with NFL airway and a given stimulation mode
   df_set <- df1[df1[stim] == stim_mode & df1[airway] == 'NFL',]
+  #calculates minimum CPAP for subset
   min_nfl_p <- suppressWarnings(ifelse(is.infinite(min(df_set$CPAP.ceil)), NA, min(df_set$CPAP.ceil)))
+  #calculates mean Flow.max.adj among minimum CPAP for subset
   y_nfl <- suppressWarnings(ifelse(is.na(min_nfl_p), NA, mean(df_set$Flow.max.adj[df_set$CPAP.ceil == min_nfl_p])))
   return(y_nfl)
 }
 
+#Stimulation Loop 2 -- CHECK
 stim_loop2 <- function(df2, stim_mode, stim = stim_lbl, airway = airway_lbl) {
-  
+  #subset data to given stimulation mode
   df_set <- df2[df2[stim] == stim_mode,]
   num.c <- ncol(df_set)
   
+  #selects flow limited breaths
   fl_rows <- which(df_set[airway] == 'FL')
   fl <- df_set[fl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
-  fl['Flow.max.adj'] <- fl['Flow.max.adj'] * 1000/60
+  fl['Flow.max.adj'] <- fl['Flow.max.adj'] * 1000/60 #converts from L/min to mL/sec
   fl <- cbind(fl, Annotations = df_set[fl_rows, 7:num.c])
   
+  #max apnea CPAP (if stim_mode does not have apnea breaths, = NA)
   max_apnea_p <- suppressWarnings({ifelse(is.infinite(max(df_set[df_set[airway] == 'Apnea', 'CPAP.ceil'])), NA, max(df_set[df_set[airway] == 'Apnea', 'CPAP.ceil']))})
+  #min nfl CPAP (if stim_mode does not have nfl breaths, = NA)
   min_nfl_p <- suppressWarnings({ifelse(is.infinite(min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil'])), NA, min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil']))})
   
+  #selects apnea breaths (those that have CPAP = max_apnea_p)
   ap_rows <- which(df_set[airway] == 'Apnea' & df_set$CPAP.ceil == max_apnea_p)
   ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   ap['Flow.max.adj'] <- ap['Flow.max.adj'] * 1000/60
   ap <- cbind(ap, Annotations = df_set[ap_rows, 7:num.c])
   
+  #selects nfl breaths (those that have CPAP = min_nfl_p)
   nfl_rows <- which(df_set[airway] == 'NFL' & df_set$CPAP.ceil == min_nfl_p)
   nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   nfl['Flow.max.adj'] <- nfl['Flow.max.adj'] * 1000/60
   nfl <- cbind(nfl, Annotations = df_set[nfl_rows, 7:num.c])
   
+  #output of fl, ap, and nfl
   data <- rbind(fl, ap, nfl)
   colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'stim', 'stim.val', 'Annotations')
   
@@ -224,11 +274,14 @@ stim_loop2 <- function(df2, stim_mode, stim = stim_lbl, airway = airway_lbl) {
 }
 
 figure <- function(data, stim_mode, lbl_size = 15, stim = stim_lbl, airway = airway_lbl) {
-  
+  #Pulls data for given stim mode
   dat <- as.data.frame(data[,colnames(data) == stim_mode])
   
+  # switch all annotations to lower case
   dat[,'Annotations'] <- tolower(dat[,'Annotations'])
   
+  #Here, you can add whatever changes to plot status that you want.
+  # EX: I have it set to remove any annotation that contains 'test'.
   dat[,'Status'] <- ifelse(is.na(str_extract(dat[,'Annotations'], "test")), 'Inside', 'Remove')
   tab <- dat
   dat <- dat[dat$Status == 'Inside',]
@@ -248,16 +301,17 @@ figure <- function(data, stim_mode, lbl_size = 15, stim = stim_lbl, airway = air
     marker_type = 'square'
   }
   
+  #formatting for fl points
   fl_list <- list(x = c(dat[dat$airway == 'FL',]$x_arr), y = c(dat[dat$airway == 'FL',]$y_arr), 
                   name = paste(stim_mode, 'FL'), mode = 'markers',
                   marker = list(size = lbl_size, color = marker_color, opacity = 0.3, line = list(color = marker_color, width = 2)), 
                   symbols = marker_type)
-  
+  #formatting for apnea points
   apnea_list <- list(x = c(dat[dat$airway == 'Apnea',]$x_arr), y = c(dat[dat$airway == 'Apnea',]$y_arr), 
                      name = paste(stim_mode, 'Apnea'), mode = 'markers',
                      marker = list(size = lbl_size, color = marker_color, opacity = 0.3, line = list(color = marker_color, width = 2)), 
                      symbols = marker_type)
-  
+  #formatting for nfl points
   nfl_list <- list(x = c(dat[dat$airway == 'NFL',]$x_arr), y = c(dat[dat$airway == 'NFL',]$y_arr), 
                    name = paste(stim_mode, 'NFL'), mode = 'markers',
                    marker = list(size = lbl_size, color = 'white', opacity = 0.7, line = list(color = marker_color, width = 2)), 
@@ -271,41 +325,46 @@ show_curve <- function(data, y.open) {
   plt <- vector(mode='list')
   legend <- vector(mode='list')
   
-  for (i in seq(ncol(data))){
+  for (i in seq(ncol(data))){ #each column of data is one stim mode
+    #Pull data for a particular stim mode
     name <- colnames(data)[i]
     df_temp <- as.data.frame(data[,i])
-    x <- df_temp$x_arr
-    y <- df_temp$y_arr
+    x <- df_temp$x_arr #CPAP
+    y <- df_temp$y_arr #Flow.max.adj
     
-    if(length(x) >= 2){
+    if(length(x) >= 2){ #if there is more than one point
+      #fit line (y = ax + b)
       z <- np$polyfit(x, y, 1)
       p <- np$poly1d(z)
+      
+      #To calculate P-crit
       x_zero <- -z[2]/z[1]
       
       x_nfl_min <- suppressWarnings({ifelse(is.infinite(min(df_temp[df_temp$airway == 'NFL',]$x_arr)), NA, min(df_temp[df_temp$airway == 'NFL',]$x_arr))})
       
+      #To calculate P-open
       x_open <- suppressWarnings({ifelse(is.infinite(max(c((y.open - z[2])/z[1], x_nfl_min), na.rm = TRUE)), NA, 
                                          max(c((y.open - z[2])/z[1], x_nfl_min), na.rm = TRUE))})
-      
+      #X points of curve
       #x_plt <- c(x_zero, x_open)
       x_plt <- seq(-5, 20, by = 0.1)
       
       popen <- (y.open - z[2])/z[1]
       
+      #legend
       line1 <- paste0(name, ": y = ", round(z[1], 2), "x + ", round(z[2], 2))
       line2 <- paste0("Pcrit: ", round(x_zero, 2), "; Popen: ", round(popen, 2))
       
       legend[[name]] <- data.frame(line1, line2)
       
+      #points for line
       plt[[name]] <- data.frame(x = x_plt, y = p(x_plt))
-    } else {
+    } else { #if there is only one point...legend is as follows
       line1 <- paste0("Too few points to calculate line.")
       line2 <- paste0("Pcrit: NA; Popen: NA")
       legend[[name]] <- data.frame(line1, line2)
       plt[[name]] <- data.frame(x = c(0,1), y = c(0,1))
     }
-    
-    
 
   }
   
@@ -313,24 +372,28 @@ show_curve <- function(data, y.open) {
 }
 
 show_outside <- function(df4, stim_mode, stim = stim_lbl, airway = airway_lbl) {
-  
+  #subset data to given stimulation mode
   df_set <- df4[df4[stim] == stim_mode,]
   num.c <- ncol(df_set)
   
+  #max apnea CPAP (if stim_mode does not have apnea breaths, = NA)
   max_apnea_p <- suppressWarnings({max(df_set[df_set[airway] == 'Apnea', 'CPAP.ceil'])})
+  #min nfl CPAP (if stim_mode does not have nfl breaths, = NA)
   min_nfl_p <- suppressWarnings({min(df_set[df_set[airway] == 'NFL', 'CPAP.ceil'])})
   
+  #selects apnea breaths (those that have CPAP = max_apnea_p)
   ap_rows <- which(df_set[airway] == 'Apnea' & df_set$CPAP.ceil < max_apnea_p | df_set[airway] == 'Dogleg')
   ap <- df_set[ap_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   ap['Flow.max.adj'] <- ap['Flow.max.adj'] * 1000/60
   ap <- cbind(ap, Annotaions = df_set[ap_rows, 7:num.c])
   
+  #selects nfl breaths (those that have CPAP = min_nfl_p)
   nfl_rows <- which(df_set[airway] == 'NFL' & df_set$CPAP.ceil > min_nfl_p)
   nfl <- df_set[nfl_rows, c('Ins start', 'Ins end', 'CPAP.ceil', 'Flow.max.adj', airway, stim)]
   nfl['Flow.max.adj'] <- nfl['Flow.max.adj'] * 1000/60
   nfl <- cbind(nfl, Annotaions = df_set[nfl_rows, 7:num.c])
   
-  
+  #output of ap and nfl
   data <- rbind(ap, nfl)
   colnames(data) <- c('Ins start', 'Ins end', 'x_arr', 'y_arr', 'airway', 'stim', 'stim.val', 'Annotations')
   
@@ -339,11 +402,14 @@ show_outside <- function(df4, stim_mode, stim = stim_lbl, airway = airway_lbl) {
 }
 
 figure_outside <- function(data, stim_mode, lbl_size = 15, stim = stim_lbl, airway = airway_lbl) {
-  
+  #Pulls data for given stim mode
   dat <- as.data.frame(data[, stim_mode])
   
+  # switch all annotations to lower case
   dat[,'Annotations'] <- tolower(dat[,'Annotations'])
   
+  #Here, you can add whatever changes to plot status that you want.
+  # EX: I have it set to remove any annotation that contains 'test'.
   dat[,'Status'] <- ifelse(is.na(str_extract(dat[,'Annotations'], "test")), 'Outside', 'Remove')
   tab <- dat
   dat <- dat[dat$Status == 'Outside',]
@@ -363,11 +429,13 @@ figure_outside <- function(data, stim_mode, lbl_size = 15, stim = stim_lbl, airw
     marker_type = 'square-open'
   }
   
+  #formatting for apnea points
   apnea_list <- list(x = c(dat[dat$airway == 'Apnea',]$x_arr), y = c(dat[dat$airway == 'Apnea',]$y_arr), 
                      name = paste(stim_mode, 'Apnea Discard'), mode = 'markers',
                      marker = list(size = lbl_size, color = marker_color, opacity = 0.9, line = list(color = marker_color, width = 2)), 
-                     symbols = marker_type) #wrong?
+                     symbols = marker_type)
   
+  #formatting for nfl points
   nfl_list <- list(x = c(dat[dat$airway == 'NFL',]$x_arr), y = c(dat[dat$airway == 'NFL',]$y_arr), 
                    name = paste(stim_mode, 'NFL Discard'), mode = 'markers',
                    marker = list(size = lbl_size, color = marker_color, opacity = 0.9), 
@@ -376,12 +444,14 @@ figure_outside <- function(data, stim_mode, lbl_size = 15, stim = stim_lbl, airw
   return(list(list(apnea = apnea_list, nfl = nfl_list), tab))
 }
 
+#Function for a basic horizontal line on graph...suggested by plotly
 h_line <- function(y, col, type) {
   list(type = 'line', x0 = 0, x1 = 1, xref = "paper", y0 = y, y1 = y,
        line = list(color = col, dash = type))
 }
 
 get_plot_data <- function(df, reviewed = FALSE) {
+  #Set stim mode and airway status by review status
   airway_lbl <- 'Airway.status.DL'
   stim_lbl <- 'Stim.mode'
   if (reviewed == TRUE) {
@@ -389,11 +459,15 @@ get_plot_data <- function(df, reviewed = FALSE) {
     stim_lbl <- 'Stim.mode.final'
   }
   
+  #List of stim modes for that patient
   stim_mode_list <- unique(df[,stim_lbl])
   
+  #Stim Loop 1 for each stim mode (see function in function bank)
   min_nfl_list <- sapply(stim_mode_list, stim_loop1, df1 = df, stim = stim_lbl, airway = airway_lbl)
   min_nfl_list <- min_nfl_list[!is.na(min_nfl_list)]
   y.open <- mean(unlist(min_nfl_list)) * 1000/60
+  
+  #Stim Loop 2 for each stim mode (see function in function bank)
   dat <- sapply(stim_mode_list, stim_loop2, df2 = df, stim = stim_lbl, airway = airway_lbl)
   return(list(y.open, dat))
 }
@@ -401,22 +475,31 @@ get_plot_data <- function(df, reviewed = FALSE) {
 
 pressure_flow_curve_data <- function(df, reviewed = FALSE) {
 
+  #pull data from get_plot_data (see function in function bank)
   dat <- get_plot_data(df)[[2]]
   y.open <- get_plot_data(df)[[1]]
   
+  #Set stim mode and airway status by review status
   airway_lbl <- 'Airway.status.DL'
   stim_lbl <- 'Stim.mode'
   if (reviewed == TRUE) {
     airway_lbl <- 'Airway.status.final'
     stim_lbl <- 'Stim.mode.final'
   }
+  
+  #List of stim modes for that patient
   stim_mode_list <- unique(df[,stim_lbl])
   
+  #Pulls and formats data to be plotted in PFC (see function in function bank)
   fig_atts <- sapply(stim_mode_list, figure, data = dat, stim = stim_lbl, airway = airway_lbl)
 
+  #Pulls and formats data that fall outside plotting parameters for PFC 
+  # (see function in function bank)
+  # Can still plot these points if 'Show outside' is clicked.
   outside <- sapply(stim_mode_list, show_outside, df4 = df, stim = stim_lbl, airway = airway_lbl)
   outside_atts <- sapply(stim_mode_list, figure_outside, data = outside, stim = stim_lbl, airway = airway_lbl)
   
+  #Infor for curve line (see function in function bank)
   x <- show_curve(dat, y.open)
   
   return(list(fig_atts, outside_atts, x, y.open))
@@ -501,9 +584,10 @@ plot_pressure_flow_curve <- function(df, outside = FALSE, curve = FALSE) {
 #UI-----------------------------------------------------------------------------
 ui <- dashboardPage(
   dashboardHeader(title = "VUMC Sleep Study Database"),
+  #Side panel layout CHECK
   dashboardSidebar(
     useShinyjs(),
-    #Select Options 
+    #Select Subject Options 
     uiOutput("selectvar"),
     br(),
     #Time Options
@@ -519,8 +603,10 @@ ui <- dashboardPage(
     uiOutput("select_time1"),
     uiOutput("select_time2"),
     hr(), 
+    #button -- clicking plots raw signals
     h5(style="margin-left: 18px", strong("Raw Signals")),
     actionButton("run", "Plot Raw Signals"),
+    #Blank lines for formatting
     br(),
     br(),
     br(),
@@ -547,15 +633,19 @@ ui <- dashboardPage(
     hr(),
     #conditionalPanel(condition="$('html').hasClass('shiny-busy')",
     #                 tags$div("Loading...",id="loadmessage")),
+    #button -- clicking plts PFC
     h5(strong(style="margin-left: 18px", "Pressure Flow Curve")),
     actionButton("run2", "Plot Pressure Flow Curve"),
+    #check boxes -- options for PFC
     checkboxInput("curve", "Show curve?", FALSE),
     checkboxInput("outside", "Show outside?", FALSE)
   ),
+  #Body of app (split into grid of 4 boxes)
   dashboardBody(
     if(is.null(con)) {return()}
     else
     fluidRow(
+      #topleft corner - Raw Signals plot - mimics LabChart plot
       box(
         title = "Raw Signals",
         textOutput('text'),
@@ -564,18 +654,21 @@ ui <- dashboardPage(
         plotlyOutput("fig", height = 800),
         width = 6
       ),
+      #topright corner - Annotations table 
       box(
         title = "Annotations",
         fluidRow(
+          #editting + adding annotations form
           column(3,
                  div(
                    id = "form",
-                   
+                   #boxes in form to fill
                    textInput("ChannelNumber", labelMandatory("ChannelNumber"), placeholder = "", width = "150px"),
                    numericInput("AnnotationNumber", labelMandatory("AnnotationNumber"), value = 0, width = "150px"),
                    numericInput("Time", labelMandatory("Time"), value = 0, width = "150px"),
                    textAreaInput("Annotation", labelMandatory("Annotation"), placeholder = "", height = 100, width = "150px"),
                    helpText(labelMandatory(""), paste("Mandatory field.")),
+                   #buttons to click to submit changes (edit, delete, create)
                    uiOutput("submit_edit"),
                    actionButton("submit", "Submit", class = "btn-primary"),
                    br(),
@@ -589,6 +682,7 @@ ui <- dashboardPage(
                      )
                    ))
           ),
+          #annotations table
           column(9,
                  dataTableOutput("responses_table")
           )),
@@ -596,6 +690,7 @@ ui <- dashboardPage(
       )
     ),
     fluidRow(
+      #bottomleft corner - Pressure Flow Curve Plot
       box(
         title = "Pressure Flow Curve",
         textOutput('text2'),
@@ -604,6 +699,8 @@ ui <- dashboardPage(
         plotlyOutput("flow_curve", height = 500),
         width = 6
       ),
+      #bottomright corner - Breaths Table - lists all breaths in time range + 
+      # plot status (are they shown on the PFC plot or not)
       box(
         title = "Breaths",
         conditionalPanel(condition="$('html').hasClass('shiny-busy')",
@@ -618,24 +715,29 @@ ui <- dashboardPage(
 #Server-------------------------------------------------------------------------
 server <- function(input, output, session) {
   
-#Selecting subject to graph-----------------------------------------------------
+#Dropdown menu to select subject to graph---------------------------------------
   output$selectvar <- renderUI({
+    #opts = list of all Subject IDs in SQL database
     opts <- dbGetQuery(con, 'SELECT SubjectID FROM pt_char')[[1]]
     list(selectInput("Select2", "Select Subject:", choices = opts)
     )
   })
   
-#Enter Time Range -------------------------------------------------------------- 
+#Time range---------------------------------------------------------------------
+  #if(is.null(input$Select2)) {return()} prevents error from appearing before app
+  # connects to SQL database
   
-  #Range of possible times
+  #Range of possible times -- reference function
   poss_time <- reactive({
     if(is.null(input$Select2)) {return()}
+    #pull time for given subject
     query_sub = paste0("SELECT TIME FROM channeldata WHERE ChannelID = 2 and SubjectID =", input$Select2)
     time <- dbGetQuery(con, query_sub)
+    #prints min and max time (in seconds) for given subject
     c(min(time), max(time))
   })
   
-  #Enter Start Time
+  #Box to enter start time
   output$select_time1 <- renderUI({
     if(is.null(input$Select2)) {return()}
     list(numericInput("Time1", "Start:", value = poss_time()[1], 
@@ -643,7 +745,7 @@ server <- function(input, output, session) {
     )
   })
   
-  #Enter End Time
+  #Box to enter end time
   output$select_time2 <- renderUI({
     if(is.null(input$Select2)) {return()}
     list(numericInput("Time2", "End:", value = poss_time()[2], 
@@ -651,17 +753,23 @@ server <- function(input, output, session) {
     )
   })
   
+  #Printed Instructions for Entering Time Range
+  #Statements that lists range of possible times for data
+  output$time_range <- renderText({
+    if(is.null(input$Select2)) {return()}
+    paste0("     The time range for the selected      subject is ",
+           poss_time()[1], " to ", poss_time()[2], " seconds.")
+  })
+  
+  #Next two functions purpose:
+  #When 'Plot Raw Signals' is clicked, the entered time values are pushed to 
+  # the new graph; prevents graph from reloading while entering new time.
+  
   #Setting Time as Reactive Values
   time <- reactiveValues(time1 = NULL, time2 = NULL) 
   observeEvent(input$run,{time$time1 <- input$Time1})
   observeEvent(input$run,{time$time2 <- input$Time2})
   
-  #Printed Instructions for Entering Time Range
-  output$time_range <- renderText({
-    if(is.null(input$Select2)) {return()}
-    paste0("     The time range for the selected      subject is ",
-           poss_time()[1], " to ", poss_time()[2], " seconds.")
-    })
   
   #Set Time Range When Button is Pressed (also renders error messages for invalid values)
   range <- eventReactive(input$run, {
@@ -672,12 +780,16 @@ server <- function(input, output, session) {
     c(as.numeric(time$time1), as.numeric(time$time2))
   })
   
-  #Hide Button Until Time is Loaded
+  #Hide 'Plot Raw Signals' Button Until Time is Loaded
   observe({
     shinyjs::hide("run")
     if(!is.null(input$Time1))
       shinyjs::show("run")
   })
+  
+  #Next two functions purpose:
+  #When 'Plot Pressure Flow Curve' is clicked, the entered time values are pushed to 
+  # the new graph; prevents graph from reloading while entering new time.
   
   #Setting Time for Flow Curve as Reactive Variable
   time_flow <- reactiveValues(time1 = NULL, time2 = NULL) 
@@ -693,7 +805,7 @@ server <- function(input, output, session) {
     c(as.numeric(time_flow$time1), as.numeric(time_flow$time2))
   })
   
-  #Hide Flow Curve Button Until Time is Loaded #HELP
+  #Next 3 Observe Functions: Hide PFC Buttons Until Time is Loaded 
   observe({ 
     shinyjs::hide("run2")
     if(!is.null(input$Time1))
@@ -712,9 +824,9 @@ server <- function(input, output, session) {
       shinyjs::show("outside")
   })
   
-  #Raw Signals Tab Message--------------------------------------------------------
+#Raw Signals Tab Message--------------------------------------------------------
   output$text = renderText({"Enter time range and press 'Plot Raw Signals' to view graphs."})
-  
+  #Hide when run button is clicked
   observe({
     shinyjs::show("text")
     
@@ -722,9 +834,9 @@ server <- function(input, output, session) {
       shinyjs::hide("text")
   })
   
-  #Plot Pressure Flow Tab Message-------------------------------------------------
+#Plot Pressure Flow Tab Message-------------------------------------------------
   output$text2 = renderText({"Enter time range and press 'Plot Pressure Flow Curve' to view graphs."})
-  
+  #Hide when run2 button is clicked
   observe({
     shinyjs::show("text2")
     
@@ -733,7 +845,7 @@ server <- function(input, output, session) {
   })
   
 #Meta Data----------------------------------------------------------------------
-  
+  #Pulls meta data and changes formatting of Channel Name
   meta <- reactive({
     meta <- dbGetQuery(con, 'SELECT * FROM channelmeta')
     meta$ChannelName <- sub("_", " ", meta$ChannelName)
@@ -741,6 +853,8 @@ server <- function(input, output, session) {
   })
   
 #Data---------------------------------------------------------------------------
+  #Pull all data for reference throughout app; only changes with selected patient
+  # changes. See function in function bank.
   chan1 <- reactive(get_channel_data(1, input$Select2, meta(), downsamp = TRUE))
   chan2 <- reactive(get_channel_data(2, input$Select2, meta()))
   chan3 <- reactive(get_channel_data(3, input$Select2, meta()))
@@ -750,10 +864,12 @@ server <- function(input, output, session) {
   chan7 <- reactive(get_channel_data(7, input$Select2, meta()))
   chan8 <- reactive(get_channel_data(8, input$Select2, meta()))
   
+  #List of all data
   chans <- reactive(list(chan1(), chan2(), chan3(), chan4(), chan5(), chan6(), chan7(), chan8()))
   
   #Figure-------------------------------------------------------------------------
   output$fig <- renderPlotly({
+    #Creates Value vs. Time for each channel; see function in function bank.
     plot1 <- basic_plot(chan1(), range(), meta(), annots(), input$Select2, "red")
     plot2 <- basic_plot(chan2(), range(), meta(), annots(), input$Select2, "blue")
     plot3 <- basic_plot(chan3(), range(), meta(), annots(), input$Select2, "yellowgreen")
@@ -763,6 +879,7 @@ server <- function(input, output, session) {
     plot7 <- basic_plot(chan7(), range(), meta(), annots(), input$Select2, "peru")
     plot8 <- basic_plot(chan8(), range(), meta(), annots(), input$Select2, "mediumpurple")
     
+    #Creates 8 row single plot of all channels; will zoom and drag together.
     p <- subplot(list(plot1, plot2, plot3, plot4, plot5, plot6, plot7, plot8), 
                  nrows = 8, shareX = TRUE, margin = 0.02) %>% layout(xaxis = list(title = 'Time (sec)'))
     p <- hide_legend(p)
@@ -771,22 +888,30 @@ server <- function(input, output, session) {
   
 #Pressure Flow Curve------------------------------------------------------------
   
+  #Function to build model for DL Airway Status
   model <- reactive({build_model_inception(input_shape = c(299,299,3), num_classes=3)}) 
-    #needs to be outside the df_breaths reactive element so that the program does not rebuild the model everytime
+    #needs to be outside the df_breaths reactive element so that the program 
+    # does not rebuild the model everytime
   
+  #Function to create PFC info (this is called in two places later on...once for
+  # graph and once for table)
   df_breaths <- reactive({ 
     
+    #creating DL model
     model <- model()
+    #setting range to PFC range from side panel
     range <- range_flow()
     
-    minimun_breath_dur = 2.2
+    minimun_breath_dur = 2.2 #in seconds
     meta <- meta()
-    chans_new <- limit_range(chans(), range)
-    #chan <- paste0(1, subj())
     
+    #Selecting data and annotations within range
+    chans_new <- limit_range(chans(), range)
     annots <- annots()
     annots <- annots[which(annots$Time>range[1] & annots$Time<range[2]),]
     
+    #Pulling data from meta and chans_new that will be needed for later functions.
+    # I naming everything so that it matches the names in Yike's code.
     rate_stim <- meta[meta$ChannelID == 1,'SampleRate']
     sample_rate <- unique(meta[meta$SampleRate != rate_stim, 'SampleRate'])
     
@@ -808,17 +933,24 @@ server <- function(input, output, session) {
     chan_cpap <- which(meta$ChannelName == 'CPAP Pressure')
     sig_cpap <- chans_new[[chan_cpap]]$Value
     
+    #Find start and stop times for inspiratory breaths (in hundredths of a sec)
     df <- get_cycles(sig_rip_abd, sig_rip_chst, sig_epi, sig_flow, minimun_breath_dur, sample_rate, 
                      signal_type = 'both', poly_order = 6, min_cycle = 8, rise_rate = 0.04)
     
+    #Adds duration of each inspiratory breath (in seconds)
     df2 <- recheck_cycles(df, sample_rate, minimun_rate = 0.5)
     
+  #Matching annotations to times
     cycles <- df2
+    #Convert start and stop times to seconds and adds beginning of range
     cycles[,1:2] <- (cycles[,1:2]/sample_rate) + range[1]
+    #Determines if any annotations is within time range
     c_annot <- lapply(1:nrow(cycles), function(c) {
       annots$Annotation[annots$Time >= cycles[c, 1] & annots$Time <= cycles[c, 2]]
     })
+    #Maximum number of annotations per breath (sometimes there are more than 1)
     max_len <- max(max(sapply(c_annot, length)), 1)
+    #Creating matrix to store annotations by breath (1 per column)
     c_annot2 <- matrix(NA, nrow = nrow(cycles), ncol = max_len)
     
     # Fill in matrix with annotations
@@ -826,21 +958,27 @@ server <- function(input, output, session) {
       if(length(c_annot[[c]]) == 0) {c_annot[[c]] <- NA}
       c_annot2[c, 1:length(c_annot[[c]])] <- c_annot[[c]]
     } 
-    
+    #Adding annotations to cycles table
     cycles <- cbind(cycles, c_annot2)
     
+    #Add start and stop time of expiratory breaths (time between inspiratory)
     df3 <- get_baseline_portions(df2, sig_flow)
-    
+    #Calculating means as labelled
     df3['Exp.flow.mean'] <- apply(df3, 1, get_baseline, vector = sig_flow)
     df3['Exp.chst.mean'] <- apply(df3, 1, get_baseline, vector = sig_rip_chst)
     df3['Exp.abd.mean'] <- apply(df3, 1, get_baseline, vector = sig_rip_abd)
     
-    
+    #Adds a whole lot more columns (mainly mean and median calculations)
     df4 <- get_measurement(df3, sig_flow, sig_rip_chst, sig_rip_abd, sig_stim_lfilt, sig_epi, sample_rate, range[1], sig_cpap)
+    #Adds a whole lot more columns (such as stim mode, airway status, flow.max.adj, etc.)
     df5 <- data_analysis(df4)
+    #DL to determine airway status
     df6 <- detect_airway_status_dl(sig_flow, df5, model)
+    #TBH I have no idea why Yike ran this step again
     df_breaths <- data_analysis(df6)
     
+    #Choosing stim and airway label (reviewed, DL, etc.)
+    # Could set up check box ('Reviewed?') to switch this 
     reviewed = FALSE
     airway_lbl <- 'Airway.status.DL'
     stim_lbl <- 'Stim.mode'
@@ -848,28 +986,35 @@ server <- function(input, output, session) {
       airway_lbl <- 'Airway.status.final'
       stim_lbl <- 'Stim.mode.final'
     }
+    #Last column of cycles table (in case annotations span multiple columns)
     num.c <- ncol(cycles)
+    #Pulling desired columns to display 
     df_breaths <- cbind(cycles[,1:2], df_breaths[,c(airway_lbl, stim_lbl, 'Flow.max.adj', 'CPAP.ceil', 'Stim.at.max.flow')], Annotations = cycles[,4:num.c])
+    #See function in function bank
     p = pressure_flow_curve_data(df = df_breaths)
     return(p)
   })
   
+  #PFC Plot (see function in function bank)
   output$flow_curve <- renderPlotly({
     plot_pressure_flow_curve(df_breaths(), outside = input$outside, curve = input$curve)
   })
   
   #Cycles Table-------------------------------------------------------------------
   
-  #reviewed <- reactiveVal(FALSE)
-
-  output$cycles <- DT::renderDataTable({   #changed to datatable, should make downloading data easier
+  output$cycles <- DT::renderDataTable({   
     df <- df_breaths()
+    #Formatting of p is weird (artifact of Yike's code), so I am pulling the 
+    # data I want for the PFC table here.
     df2 <- rbind(do.call("rbind", df[[1]][2,]), do.call("rbind", df[[2]][2,]))
     colnames(df2) <- c('Ins. Start', 'Ins. End', 'CPAP Pressure', 'PIF', 'Airway Status', 'Stim Status', 'Stim Value', 'Annot.', 'Plot Status')
+    #Rounding some values 
     df2[,c('Ins. Start', 'Ins. End', 'PIF')] <- round(df2[,c('Ins. Start', 'Ins. End', 'PIF')], 2)
     df2[,c('Stim Value')] <- round(df2[,c('Stim Value')], 8)
+    #Ordering by start time (sometimes this gets out of order...not sure why)
     df2[order(df2[,'Ins. Start']),]
     },
+    #Below is formatting from DataTable; I allow for downloading cycles table
     rownames = FALSE, 
     extensions = 'Buttons',
     options = list(dom = 'Blfrtip',
@@ -909,9 +1054,11 @@ server <- function(input, output, session) {
     shinyjs::toggleState(id = "submit", condition = mandatoryFilled)
   })
   
+  #List of all fields
   fieldsAll <- c("ChannelNumber", "AnnotationNumber", "Time", "Annotation")
   
-  #save form data into data_frame format
+  #save input form data into data_frame format; form data from and edit or new 
+  # creation of an annotation
   formData <- reactive({
     
     formData <- data.frame(AnnotationID = input$AnnotationNumber,
@@ -925,41 +1072,42 @@ server <- function(input, output, session) {
   })
   
   #Add Data Functions-------------------------------------------------------------
-  appendData <- function(data){
-    quary <- sqlAppendTable(con, "annots", data, row.names = FALSE)
-    dbExecute(con, quary)
+  appendData <- function(data){ #data = info from form
+    query <- sqlAppendTable(con, "annots", data, row.names = FALSE)
+    dbExecute(con, query)
   }
   
+  #When 'Submit' is pressed, the form data is added to annotations table in SQL 
+  # (and annotations table in app). All boxes of the form are changed to the 
+  # listed values.
   observeEvent(input$submit, priority = 20,{
     appendData(formData())
-    updateTextInput(session, "ChannelNumber", value = " ")
+    updateTextInput(session, "ChannelNumber", value = "0")
     updateNumericInput(session, "AnnotationNumber", value = 0)
     updateNumericInput(session, "Time", value = 0)
-    updateTextAreaInput(session, "Annotation", value = " ")
+    updateTextAreaInput(session, "Annotation", value = "Insert Annotation Here")
   })
   
-  #Delete Data Functions ---------------------------------------------------------#HELP
+  #Delete Data Functions -------------------------------------------------------#check
   deleteData <- reactive({
+    #looks at table and determines IDs for of selected comment
     SQL_df <- dbReadTable(con, "annots")
     aID_select <- dbQuoteLiteral(con, SQL_df[input$responses_table_rows_selected, "AnnotationID"])
     sub_select <- dbQuoteLiteral(con, SQL_df[input$responses_table_rows_selected, "SubjectID"])
     
+    #SQL query to delete data 
     query <- paste0("DELETE FROM annots WHERE `AnnotationID` = ", aID_select, " AND `SubjectID` = ", sub_select )
-    #query
     dbExecute(con, query)
-    
-    #dbReadTable(con, 'annots')
     
   })
   
+  #When 'Delete' button is clicked, checked to make sure only one annotation is 
+  # selected. If so, delete. If not, send warning message.
   observeEvent(input$delete_button, priority = 20,{
-    
     if(length(input$responses_table_rows_selected)>=1 ){
       deleteData()
     }
-    
     showModal(
-      
       if(length(input$responses_table_rows_selected) < 1 ){
         modalDialog(
           title = "Warning",
@@ -970,7 +1118,7 @@ server <- function(input, output, session) {
   
 #Edit Data Functions------------------------------------------------------------
   observeEvent(input$edit_button, priority = 20,{
-    
+    #When edit button is pressed, hide 'Submit' button and show 'Submit Edit'.
     hide("submit")
     show("submit_edit")
     
@@ -978,6 +1126,8 @@ server <- function(input, output, session) {
       actionButton("submit_edit", label = "Submit Edit", class = "btn-primary")
     })
     
+    #When 'Edit' button is clicked, checked to make sure only one annotation is 
+    # selected. If so, load info into form. If not, send warning message.
     showModal(
       if(length(input$responses_table_rows_selected) > 1 ){
         modalDialog(
@@ -1000,6 +1150,8 @@ server <- function(input, output, session) {
     }
   }) 
   
+  #When 'Submit Edit' button is clicked, load form info into table in location of
+  # last clicked location.
   observeEvent(input$submit_edit, priority = 20, {
     
     SQL_df <- annots()
@@ -1027,11 +1179,10 @@ server <- function(input, output, session) {
   
   
   #Annotations Table--------------------------------------------------------------
+  #formatting and output for annots table
   output$responses_table <- DT::renderDataTable({
-    
     table <- annots() 
     names(table) <- c("AnnotationID", "subjectID", "ChannelID", "Time", "Annotation")
-    #table <- table %>% mutate(Time = round(Time, 2))
     table <- datatable(table, 
                        rownames = FALSE,
                        options = list(searching = TRUE, lengthChange = TRUE,
